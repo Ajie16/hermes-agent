@@ -6,6 +6,12 @@
       "zip_url": "https://lightmake.site/api/v1/download?slug=knowledge-graph",
       "source": "skillhub",
       "version": "1.0.0"
+    },
+    "autonomous-agent-toolkit": {
+      "name": "Autonomous Agent Toolkit",
+      "zip_url": "https://lightmake.site/api/v1/download?slug=autonomous-agent-toolkit",
+      "source": "skillhub",
+      "version": "3.1.0"
     }
   }
 }
