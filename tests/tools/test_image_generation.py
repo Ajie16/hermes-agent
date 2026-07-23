@@ -107,16 +107,16 @@ class TestAspectRatioFamily:
     """Nano-banana uses aspect_ratio enum, NOT image_size."""
 
     def test_nano_banana_landscape_uses_aspect_ratio(self, image_tool):
-        p = image_tool._build_fal_payload("fal-ai/nano-banana", "hello", "landscape")
+        p = image_tool._build_fal_payload("fal-ai/nano-banana-pro", "hello", "landscape")
         assert p["aspect_ratio"] == "16:9"
         assert "image_size" not in p
 
     def test_nano_banana_square_uses_aspect_ratio(self, image_tool):
-        p = image_tool._build_fal_payload("fal-ai/nano-banana", "hello", "square")
+        p = image_tool._build_fal_payload("fal-ai/nano-banana-pro", "hello", "square")
         assert p["aspect_ratio"] == "1:1"
 
     def test_nano_banana_portrait_uses_aspect_ratio(self, image_tool):
-        p = image_tool._build_fal_payload("fal-ai/nano-banana", "hello", "portrait")
+        p = image_tool._build_fal_payload("fal-ai/nano-banana-pro", "hello", "portrait")
         assert p["aspect_ratio"] == "9:16"
 
 
@@ -134,6 +134,49 @@ class TestGptLiteralFamily:
     def test_gpt_portrait_is_literal(self, image_tool):
         p = image_tool._build_fal_payload("fal-ai/gpt-image-1.5", "hello", "portrait")
         assert p["image_size"] == "1024x1536"
+
+
+class TestGptImage2Presets:
+    """GPT Image 2 uses preset enum sizes (not literal strings like 1.5).
+    Mapped to 4:3 variants so we stay above the 655,360 min-pixel floor
+    (16:9 presets at 1024x576 = 589,824 would be rejected)."""
+
+    def test_gpt2_landscape_uses_4_3_preset(self, image_tool):
+        p = image_tool._build_fal_payload("fal-ai/gpt-image-2", "hello", "landscape")
+        assert p["image_size"] == "landscape_4_3"
+
+    def test_gpt2_square_uses_square_hd(self, image_tool):
+        p = image_tool._build_fal_payload("fal-ai/gpt-image-2", "hello", "square")
+        assert p["image_size"] == "square_hd"
+
+    def test_gpt2_portrait_uses_4_3_preset(self, image_tool):
+        p = image_tool._build_fal_payload("fal-ai/gpt-image-2", "hello", "portrait")
+        assert p["image_size"] == "portrait_4_3"
+
+    def test_gpt2_quality_pinned_to_medium(self, image_tool):
+        p = image_tool._build_fal_payload("fal-ai/gpt-image-2", "hi", "square")
+        assert p["quality"] == "medium"
+
+    def test_gpt2_strips_byok_and_unsupported_overrides(self, image_tool):
+        """openai_api_key (BYOK) is deliberately not in supports — all users
+        route through shared FAL billing. guidance_scale/num_inference_steps
+        aren't in the model's API surface either."""
+        p = image_tool._build_fal_payload(
+            "fal-ai/gpt-image-2", "hi", "square",
+            overrides={
+                "openai_api_key": "sk-...",
+                "guidance_scale": 7.5,
+                "num_inference_steps": 50,
+            },
+        )
+        assert "openai_api_key" not in p
+        assert "guidance_scale" not in p
+        assert "num_inference_steps" not in p
+
+    def test_gpt2_strips_seed_even_if_passed(self, image_tool):
+        # seed isn't in the GPT Image 2 API surface either.
+        p = image_tool._build_fal_payload("fal-ai/gpt-image-2", "hi", "square", seed=42)
+        assert "seed" not in p
 
 
 # ---------------------------------------------------------------------------
@@ -164,13 +207,17 @@ class TestSupportsFilter:
         assert "num_inference_steps" not in p
 
     def test_recraft_has_minimal_payload(self, image_tool):
-        # Recraft supports prompt, image_size, style only.
-        p = image_tool._build_fal_payload("fal-ai/recraft-v3", "hi", "landscape")
-        assert set(p.keys()) <= {"prompt", "image_size", "style"}
+        # Recraft V4 Pro supports prompt, image_size, enable_safety_checker,
+        # colors, background_color (no seed, no style — V4 dropped V3's style enum).
+        p = image_tool._build_fal_payload("fal-ai/recraft/v4/pro/text-to-image", "hi", "landscape")
+        assert set(p.keys()) <= {
+            "prompt", "image_size", "enable_safety_checker",
+            "colors", "background_color",
+        }
 
     def test_nano_banana_never_gets_image_size(self, image_tool):
         # Common bug: translator accidentally setting both image_size and aspect_ratio.
-        p = image_tool._build_fal_payload("fal-ai/nano-banana", "hi", "landscape", seed=1)
+        p = image_tool._build_fal_payload("fal-ai/nano-banana-pro", "hi", "landscape", seed=1)
         assert "image_size" not in p
         assert p["aspect_ratio"] == "16:9"
 
@@ -227,10 +274,11 @@ class TestGptQualityPinnedToMedium:
         assert p["quality"] == "medium"
 
     def test_non_gpt_model_never_gets_quality(self, image_tool):
-        """quality is only meaningful for gpt-image-1.5 — other models should
-        never have it in their payload."""
+        """quality is only meaningful for GPT-Image models (1.5, 2) — other
+        models should never have it in their payload."""
+        gpt_models = {"fal-ai/gpt-image-1.5", "fal-ai/gpt-image-2"}
         for mid in image_tool.FAL_MODELS:
-            if mid == "fal-ai/gpt-image-1.5":
+            if mid in gpt_models:
                 continue
             p = image_tool._build_fal_payload(mid, "hi", "square")
             assert "quality" not in p, f"{mid} unexpectedly has 'quality' in payload"
@@ -285,9 +333,9 @@ class TestModelResolution:
     def test_config_wins_over_env_var(self, image_tool, monkeypatch):
         monkeypatch.setenv("FAL_IMAGE_MODEL", "fal-ai/z-image/turbo")
         with patch("hermes_cli.config.load_config",
-                   return_value={"image_gen": {"model": "fal-ai/nano-banana"}}):
+                   return_value={"image_gen": {"model": "fal-ai/nano-banana-pro"}}):
             mid, _ = image_tool._resolve_fal_model()
-        assert mid == "fal-ai/nano-banana"
+        assert mid == "fal-ai/nano-banana-pro"
 
 
 # ---------------------------------------------------------------------------
@@ -315,11 +363,16 @@ class TestAspectRatioNormalization:
 
 class TestRegistryIntegration:
 
-    def test_schema_exposes_only_prompt_and_aspect_ratio_to_agent(self, image_tool):
-        """The agent-facing schema must stay tight — model selection is a
-        user-level config choice, not an agent-level arg."""
+    def test_schema_exposes_expected_agent_params(self, image_tool):
+        """The agent-facing schema exposes the unified text+image surface:
+        prompt (required), aspect_ratio, and the image-to-image inputs
+        image_url + reference_image_urls. Model selection stays a user-level
+        config choice, never an agent-level arg."""
         props = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
-        assert set(props.keys()) == {"prompt", "aspect_ratio"}
+        assert set(props.keys()) == {
+            "prompt", "aspect_ratio", "image_url", "reference_image_urls",
+        }
+        assert image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["required"] == ["prompt"]
 
     def test_aspect_ratio_enum_is_three_values(self, image_tool):
         enum = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["aspect_ratio"]["enum"]
@@ -387,10 +440,10 @@ class TestManagedGatewayErrorTranslation:
                             lambda gw: mock_managed_client)
 
         with pytest.raises(ValueError) as exc_info:
-            image_tool._submit_fal_request("fal-ai/nano-banana", {"prompt": "x"})
+            image_tool._submit_fal_request("fal-ai/nano-banana-pro", {"prompt": "x"})
 
         msg = str(exc_info.value)
-        assert "fal-ai/nano-banana" in msg
+        assert "fal-ai/nano-banana-pro" in msg
         assert "403" in msg
         assert "FAL_KEY" in msg
         assert "hermes tools" in msg
@@ -448,3 +501,134 @@ class TestManagedGatewayErrorTranslation:
 
         with pytest.raises(ConnectionError):
             image_tool._submit_fal_request("fal-ai/flux-2-pro", {"prompt": "x"})
+
+
+class TestKreaModelNormalization:
+    """Native ``krea-2-*`` detection for managed Krea routing."""
+
+    def test_native_models_detected(self, image_tool):
+        for mid in ("krea-2-medium", "krea-2-large", "krea-2-medium-turbo"):
+            assert image_tool.is_krea_model(mid) is True
+            assert image_tool._normalize_krea_model(mid) == mid
+
+    def test_fal_krea_models_are_not_native_krea(self, image_tool):
+        # fal-ai/krea/v2/* stays on the FAL path — not the Krea plugin.
+        for mid in (
+            "fal-ai/krea/v2/medium/text-to-image",
+            "fal-ai/krea/v2/large/text-to-image",
+            "fal-ai/krea/v2/medium",
+            "fal-ai/krea/v2/large/edit",
+        ):
+            assert image_tool.is_krea_model(mid) is False
+            assert image_tool._normalize_krea_model(mid) is None
+
+    def test_non_krea_models_are_not_krea(self, image_tool):
+        for mid in ("fal-ai/flux-2/klein/9b", "fal-ai/nano-banana-pro", None, "", 123):
+            assert image_tool.is_krea_model(mid) is False
+            assert image_tool._normalize_krea_model(mid) is None
+
+
+class TestManagedKreaRouting:
+    """`_maybe_route_managed_krea` only fires for Krea models in managed mode."""
+
+    def test_no_route_when_model_not_krea(self, image_tool, monkeypatch):
+        monkeypatch.setattr(image_tool, "_read_configured_image_provider", lambda: None)
+        monkeypatch.setattr(
+            image_tool, "_read_configured_image_model", lambda: "fal-ai/flux-2/klein/9b"
+        )
+        assert image_tool._maybe_route_managed_krea("p", "square") is None
+
+    def test_no_route_when_provider_is_krea_plugin(self, image_tool, monkeypatch):
+        # provider == "krea" is handled by the normal plugin dispatch instead.
+        monkeypatch.setattr(image_tool, "_read_configured_image_provider", lambda: "krea")
+        monkeypatch.setattr(
+            image_tool, "_read_configured_image_model", lambda: "krea-2-medium"
+        )
+        assert image_tool._maybe_route_managed_krea("p", "square") is None
+
+    def test_no_route_for_fal_krea_model_in_managed_mode(self, image_tool, monkeypatch):
+        # fal-ai/krea/v2/* stays on FAL even when the Krea gateway is available.
+        monkeypatch.setattr(image_tool, "_read_configured_image_provider", lambda: None)
+        monkeypatch.setattr(
+            image_tool,
+            "_read_configured_image_model",
+            lambda: "fal-ai/krea/v2/medium/text-to-image",
+        )
+        import plugins.image_gen.krea as krea_mod
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            krea_mod,
+            "_resolve_managed_krea_gateway",
+            lambda: SimpleNamespace(
+                vendor="krea",
+                gateway_origin="https://krea-gateway.example.com",
+                nous_user_token="tok",
+                managed_mode=True,
+            ),
+        )
+        assert image_tool._maybe_route_managed_krea("p", "square") is None
+
+    def test_no_route_for_krea_model_in_direct_mode(self, image_tool, monkeypatch):
+        # Native krea-2-* selected, but no managed gateway (BYO/direct) → fall through.
+        monkeypatch.setattr(image_tool, "_read_configured_image_provider", lambda: None)
+        monkeypatch.setattr(
+            image_tool,
+            "_read_configured_image_model",
+            lambda: "krea-2-medium",
+        )
+        import plugins.image_gen.krea as krea_mod
+
+        monkeypatch.setattr(krea_mod, "_resolve_managed_krea_gateway", lambda: None)
+        assert image_tool._maybe_route_managed_krea("p", "square") is None
+
+    def test_routes_native_krea_model_to_krea_plugin_in_managed_mode(
+        self, image_tool, monkeypatch
+    ):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        import json as _json
+
+        monkeypatch.setattr(image_tool, "_read_configured_image_provider", lambda: None)
+        monkeypatch.setattr(
+            image_tool,
+            "_read_configured_image_model",
+            lambda: "krea-2-large",
+        )
+        import plugins.image_gen.krea as krea_mod
+
+        monkeypatch.setattr(
+            krea_mod,
+            "_resolve_managed_krea_gateway",
+            lambda: SimpleNamespace(
+                vendor="krea",
+                gateway_origin="https://krea-gateway.example.com",
+                nous_user_token="tok",
+                managed_mode=True,
+            ),
+        )
+
+        fake_provider = MagicMock()
+        fake_provider.generate.return_value = {"success": True, "image": "/tmp/x.png"}
+        monkeypatch.setattr(
+            "agent.image_gen_registry.get_provider", lambda name: fake_provider
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins._ensure_plugins_discovered", lambda *a, **k: None
+        )
+
+        out = image_tool._maybe_route_managed_krea("a cat", "portrait")
+        assert out is not None
+        assert _json.loads(out)["success"] is True
+        kwargs = fake_provider.generate.call_args.kwargs
+        assert kwargs["model"] == "krea-2-large"
+        assert kwargs["prompt"] == "a cat"
+        assert kwargs["aspect_ratio"] == "portrait"
+
+
+class TestFalKreaCatalog:
+    """Krea 2 on FAL remains in the FAL picker for FAL-billed users."""
+
+    def test_fal_krea_models_in_fal_catalog(self, image_tool):
+        assert "fal-ai/krea/v2/medium/text-to-image" in image_tool.FAL_MODELS
+        assert "fal-ai/krea/v2/large/text-to-image" in image_tool.FAL_MODELS
